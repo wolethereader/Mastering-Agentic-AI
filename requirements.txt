@@ -1,0 +1,145 @@
+# =============================================================================
+# Mastering Agentic AI — Manning Publications
+# requirements.txt  |  Core runtime dependencies
+# =============================================================================
+#
+# Andrew Ng principle: pin your versions. Reproducibility is not optional.
+# A requirements file without pins is a wish list, not a contract.
+#
+# Install all core deps:
+#   pip install -r requirements.txt
+#
+# Install optional extras per chapter:
+#   pip install -r requirements-optional.txt
+#
+# Python version: 3.11 or 3.12 recommended (3.10 minimum)
+# Tested on:      macOS 14, Ubuntu 22.04, Windows 11 (WSL2)
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# CORE — required by every chapter (1–10)
+# -----------------------------------------------------------------------------
+
+# Anthropic Claude API — the LLM powering the AI Diet Coach
+anthropic>=0.40.0,<1.0.0
+
+# Environment variable management — load .env files safely
+python-dotenv>=1.0.0,<2.0.0
+
+
+# -----------------------------------------------------------------------------
+# CHAPTER 2 — Hands-On Agent Frameworks
+# used by: chapter_02_hands_on/diet_coach_v2.py
+#          chapter_02_hands_on/chapter_02_diet_coach.ipynb
+# -----------------------------------------------------------------------------
+
+# Multi-agent framework — CrewAI crew/task/agent abstraction
+# Note: CrewAI defaults to OpenAI. See appendix_a_api_keys.md for
+#       configuring it to use Anthropic instead.
+crewai>=0.80.0,<2.0.0
+
+
+# -----------------------------------------------------------------------------
+# CHAPTER 3 — Prompting and Context Engineering
+# used by: chapter_03_prompting/diet_coach_v3.py
+#          chapter_03_prompting/chapter_03_diet_coach.ipynb
+# -----------------------------------------------------------------------------
+
+# Data validation and structured output schemas
+pydantic>=2.9.0,<3.0.0
+
+# Declarative prompt optimisation framework
+# Note: DSPy uses OpenAI by default; configure for Anthropic via litellm.
+#       See chapter_03_prompting/appendix_a_api_keys.md for details.
+dspy-ai>=2.5.0,<3.0.0
+
+
+# -----------------------------------------------------------------------------
+# CHAPTER 4 — Tools and Interoperability
+# used by: chapter_04_tools/diet_coach_v4.py
+#          chapter_04_tools/diet_coach_mcp_server.py
+#          chapter_04_tools/chapter_04_diet_coach.ipynb
+# -----------------------------------------------------------------------------
+
+# Model Context Protocol SDK — build MCP servers and clients
+# The official Anthropic standard for tool interoperability
+mcp>=1.3.0,<2.0.0
+
+# HTTP client — used by get_nutrition() to call the NutritionIX API
+# Also used for any chapter that makes external HTTP requests
+requests>=2.32.0,<3.0.0
+
+
+# -----------------------------------------------------------------------------
+# CHAPTER 5 — Memory Systems
+# used by: chapter_05_memory/diet_coach_v5.py
+#          chapter_05_memory/chapter_05_diet_coach.ipynb
+#
+# No additional packages required for the in-file JSON store implementation.
+# Production upgrade packages listed in requirements-optional.txt:
+#   - pinecone-client  (vector store for episodic memory)
+#   - sentence-transformers  (embedding model for semantic search)
+#   - redis  (key-value store for semantic memory)
+# -----------------------------------------------------------------------------
+
+
+# -----------------------------------------------------------------------------
+# CHAPTER 6 — Communication Protocols
+# used by: chapter_06_communication/diet_coach_v6.py
+#          chapter_06_communication/chapter_06_diet_coach.ipynb
+#
+# No additional packages required for the in-process MessageBus.
+# Production upgrade (Redis pub/sub) listed in requirements-optional.txt.
+# -----------------------------------------------------------------------------
+
+
+# -----------------------------------------------------------------------------
+# CHAPTERS 7 & 8 — Evaluation (Fundamentals + Practice)
+# used by: chapter_07_evaluation_fundamentals/diet_coach_v7.py
+#          chapter_08_evaluation_practice/diet_coach_v8.py
+#          and their respective notebooks
+#
+# No additional packages required — all evaluation logic uses the stdlib
+# (statistics, time, hashlib) and the anthropic SDK for LLM-as-Judge.
+# -----------------------------------------------------------------------------
+
+
+# -----------------------------------------------------------------------------
+# CHAPTER 9 — Reinforcement Learning
+# used by: chapter_09_reinforcement_learning/diet_coach_v9.py
+#          chapter_09_reinforcement_learning/chapter_09_diet_coach.ipynb
+#
+# No additional packages required for the preference collector and bandit
+# optimiser. Full RLHF fine-tuning (Steps 4–5) requires GPU cluster packages
+# listed in requirements-optional.txt:
+#   - trl  (HuggingFace reward model training)
+#   - datasets  (HuggingFace dataset loading)
+# -----------------------------------------------------------------------------
+
+
+# -----------------------------------------------------------------------------
+# CHAPTER 10 — Security and Governance
+# used by: chapter_10_security_governance/diet_coach_v10.py
+#          chapter_10_security_governance/chapter_10_diet_coach.ipynb
+#
+# No additional packages required — all security primitives use the stdlib
+# (re, hmac, hashlib) and the anthropic SDK.
+# Production monitoring listed in requirements-optional.txt:
+#   - sentry-sdk  (error tracking and guardrail violation alerts)
+# -----------------------------------------------------------------------------
+
+
+# -----------------------------------------------------------------------------
+# NOTEBOOKS — Jupyter runtime (all chapters)
+# Install these to run the .ipynb files
+# -----------------------------------------------------------------------------
+
+# Jupyter Lab — recommended notebook environment
+jupyterlab>=4.0.0,<5.0.0
+
+# Classic Jupyter Notebook — alternative to Lab
+notebook>=7.0.0,<8.0.0
+
+# IPython kernel — required by both Lab and Notebook
+ipykernel>=6.29.0,<7.0.0
