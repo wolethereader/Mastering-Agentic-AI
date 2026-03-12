@@ -3,8 +3,7 @@
 # requirements.txt  |  Core runtime dependencies
 # =============================================================================
 #
-# Andrew Ng principle: pin your versions. Reproducibility is not optional.
-# A requirements file without pins is a wish list, not a contract.
+#
 #
 # Install all core deps:
 #   pip install -r requirements.txt
