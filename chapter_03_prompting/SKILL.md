@@ -1,35 +1,94 @@
-# SKILL: Nutrition Assessment Protocol
-Version: 1.0  |  Chapter: 3  |  Mastering Agentic AI
+---
+name: nutrition-assessment-protocol
+description: Use this skill when the task is to assess a person's diet, identify likely nutritional gaps, prioritise improvements, and end with exactly one measurable next step. Do not use it for medical diagnosis, therapeutic diets, or unrelated general nutrition trivia.
+---
 
-## Purpose
-This is a **procedural** skill — it tells the AI Diet Coach *how* to
-think during a dietary evaluation, not just *what facts* to know.
+# Nutrition Assessment Protocol
 
-## Protocol Steps
+This is a procedural skill for the Diet Coach. It defines how to run a
+structured dietary assessment, not just what facts to mention.
+
+## Use This Skill When
+
+- The user asks for a diet review or nutrition assessment
+- The user wants feedback on their current eating pattern
+- The user wants practical next steps to improve their diet
+- The task requires a repeatable assessment workflow rather than a casual answer
+
+## Do Not Use This Skill When
+
+- The user is asking for diagnosis or treatment of a medical condition
+- The user needs a therapeutic diet for a disease state
+- The request is a simple factual nutrition lookup
+- The user is asking for a full meal plan rather than an assessment
+
+## Inputs To Collect
+
+Before assessing, gather these inputs if they are missing:
+
+- Typical eating pattern across a normal day
+- Main goal, such as fat loss, muscle gain, or maintenance
+- Dietary restrictions or strong dislikes
+- Activity level
+- Any relevant context such as hydration, meal timing, or recurring skipped meals
+
+Do not invent missing inputs. If the user has not given enough detail,
+state the assumption or ask for the missing information.
+
+## Workflow
 
 ### Step 1 — Establish Baseline
-Ask the user for: current eating pattern (typical day), dietary
-restrictions, health goals, and activity level. Do not skip this step
-even if some answers seem implied. A baseline without data is a guess.
+
+Summarise the user’s current eating pattern in plain language.
+Focus on meal structure, protein distribution, fruit and vegetable intake,
+hydration, and any obvious routine constraints.
 
 ### Step 2 — Identify Deficits
-Against established nutritional reference values, check for:
-- Protein shortfall (< 0.8 g/kg body weight)
-- Fibre shortfall (< 25 g/day)
-- Missing micronutrient groups (dairy/calcium, leafy greens/iron)
-- Hydration (< 2 L water daily)
-Flag deficits explicitly. Do not soften findings — clarity helps users.
+
+Check for likely gaps such as:
+
+- Protein shortfall
+- Fibre shortfall
+- Low fruit and vegetable variety
+- Poor hydration
+- Large timing gaps between meals
+
+Flag deficits clearly. Do not soften them into vague language.
 
 ### Step 3 — Prioritise Changes
-Rank interventions by impact-to-effort ratio:
-1. **High impact, low effort** — fix these first (e.g. add a serving of veg)
-2. **High impact, high effort** — plan these for week 2+
-3. **Low impact** — mention but do not dwell
+
+Rank changes by impact and ease:
+
+1. High impact, low effort
+2. High impact, higher effort
+3. Lower impact improvements
+
+Lead with the smallest useful change that meaningfully improves the diet.
 
 ### Step 4 — Set One Measurable Goal
-End every assessment with exactly one concrete, time-bound goal.
-Example: "Eat 30 g of protein at breakfast every day this week."
-One goal. Not five. Behaviour change requires focus.
+
+End with exactly one concrete, time-bound goal.
+
+Good example:
+"Eat 30 grams of protein at breakfast every day this week."
+
+Bad example:
+"Try to eat healthier and drink more water."
 
 ## Output Format
-Assessment → Deficit List → Priority Action → Single Goal
+
+Use this order:
+
+1. Baseline
+2. Deficits
+3. Priority Action
+4. Your Goal This Week
+
+Keep the answer practical and direct.
+
+## Guardrails
+
+- Never diagnose medical conditions
+- Never prescribe therapeutic diets
+- Refer the user to a registered dietitian or clinician for medical nutrition therapy
+- Prefer clear, simple actions over exhaustive advice
