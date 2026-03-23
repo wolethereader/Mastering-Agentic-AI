@@ -1,359 +1,302 @@
 """
 Mastering Agentic AI — Chapter 2
-Hands-On Introduction to Building Agents
+Building Agents
 
-Sections covered:
-  2.1  Agentic Workflows and CrewAI
-  2.2  Building Our First Agentic Workflow
-  2.3  Rebuilding the Same Use Case Without a Framework
-  2.4  Boilerplate Builders: Reducing Repetition
-
-
-Running example: AI Diet Coach gains its FIRST TOOLS in this chapter.
-We give it access to a (mock) Nutrition Database and a Meal Logger.
+Minimal teaching example:
+1. A simple CrewAI diet coach team.
+2. The same workflow rebuilt with plain OpenAI API calls.
 """
 
-# ── pip install crewai anthropic ──────────────────────────────────────────────
-
 import json
-import datetime
-from typing import Any
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2.1 & 2.2  CrewAI version
+# Simple mock data
 # ─────────────────────────────────────────────────────────────────────────────
+
+FOOD_DB = {
+    "greek yogurt": {"calories": 100, "protein_g": 17, "carbs_g": 6, "fat_g": 0.7},
+    "oats": {"calories": 150, "protein_g": 5, "carbs_g": 27, "fat_g": 2.5},
+    "banana": {"calories": 105, "protein_g": 1.3, "carbs_g": 27, "fat_g": 0.4},
+    "chicken breast": {"calories": 165, "protein_g": 31, "carbs_g": 0, "fat_g": 3.6},
+    "brown rice": {"calories": 216, "protein_g": 5, "carbs_g": 45, "fat_g": 1.8},
+    "broccoli": {"calories": 55, "protein_g": 3.7, "carbs_g": 11, "fat_g": 0.6},
+    "salmon": {"calories": 208, "protein_g": 28, "carbs_g": 0, "fat_g": 10},
+    "spinach": {"calories": 23, "protein_g": 2.9, "carbs_g": 3.6, "fat_g": 0.4},
+}
+
+GOAL_TEMPLATES = {
+    "fat loss": {
+        "priority": "high protein, high fibre, controlled calories",
+        "protein_target_g": 120,
+    },
+    "muscle gain": {
+        "priority": "higher calories, high protein, balanced carbs",
+        "protein_target_g": 150,
+    },
+}
+
+MEAL_PLAN_LOG = []
+
+CLIENT_PROFILE = {
+    "name": "Maya",
+    "goal": "fat loss",
+    "dietary_preferences": "high-protein, mostly whole foods",
+    "dislikes": "mushrooms",
+    "calories_target": 1800,
+    "meals_per_day": 3,
+    "candidate_foods": [
+        "greek yogurt",
+        "oats",
+        "banana",
+        "chicken breast",
+        "broccoli",
+        "brown rice",
+        "salmon",
+        "spinach",
+    ],
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tools
+# ─────────────────────────────────────────────────────────────────────────────
+
+def lookup_food(food_name: str) -> str:
+    key = food_name.strip().lower()
+    if key in FOOD_DB:
+        return json.dumps({"food": key, **FOOD_DB[key]})
+    return json.dumps({"error": f"'{food_name}' is not in the food database"})
+
+
+def get_goal_template(goal: str) -> str:
+    key = goal.strip().lower()
+    if key in GOAL_TEMPLATES:
+        return json.dumps({"goal": key, **GOAL_TEMPLATES[key]})
+    return json.dumps({"error": f"Unknown goal '{goal}'"})
+
+
+def save_meal_plan(user_name: str, plan_markdown: str) -> str:
+    MEAL_PLAN_LOG.append({"user_name": user_name, "plan": plan_markdown})
+    return json.dumps({"saved": True, "plans_saved": len(MEAL_PLAN_LOG)})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2.2 CrewAI version
+# ─────────────────────────────────────────────────────────────────────────────
+
+crew = None
+
 try:
-    from crewai import Agent, Task, Crew, Process
-    from crewai.tools import tool
-    CREWAI_AVAILABLE = True
+    from crewai import Agent, Crew, LLM, Process, Task
+    from crewai_tools import tool
+
+    if OPENAI_API_KEY:
+        llm = LLM(model=OPENAI_MODEL, temperature=0.2)
+
+        @tool("goal_template_lookup")
+        def goal_template_lookup(goal: str) -> str:
+            """Look up the nutrition goal template."""
+            return get_goal_template(goal)
+
+        @tool("food_lookup")
+        def food_lookup(food_name: str) -> str:
+            """Look up nutrition facts for one food."""
+            return lookup_food(food_name)
+
+        @tool("plan_saver")
+        def plan_saver(user_name: str, plan_markdown: str) -> str:
+            """Save the final meal plan."""
+            return save_meal_plan(user_name, plan_markdown)
+
+        intake_agent = Agent(
+            role="Intake Coach",
+            goal="Turn the client brief into clear diet requirements.",
+            backstory="You clarify the user's goal, calorie target, and food constraints.",
+            tools=[goal_template_lookup],
+            llm=llm,
+            verbose=True,
+        )
+
+        analyst_agent = Agent(
+            role="Nutrition Analyst",
+            goal="Choose foods that fit the client's goal.",
+            backstory="You use calories and protein data to select sensible foods.",
+            tools=[food_lookup],
+            llm=llm,
+            verbose=True,
+        )
+
+        planner_agent = Agent(
+            role="Meal Planner",
+            goal="Create a simple one-day meal plan.",
+            backstory="You turn the brief and food analysis into practical meals.",
+            tools=[plan_saver],
+            llm=llm,
+            verbose=True,
+        )
+
+        intake_task = Task(
+            description=(
+                "The client is {name}. Goal: {goal}. Preferences: {dietary_preferences}. "
+                "Dislikes: {dislikes}. Calories target: {calories_target}. Meals per day: {meals_per_day}. "
+                "Use the goal template tool and write a short intake brief."
+            ),
+            expected_output="A short intake brief with priorities and protein target.",
+            agent=intake_agent,
+        )
+
+        analyst_task = Task(
+            description=(
+                "Using the intake brief and these candidate foods: {candidate_foods}, choose the best foods. "
+                "Use the food lookup tool and return 5-7 foods with a short reason for each."
+            ),
+            expected_output="A shortlist of foods with short reasons.",
+            agent=analyst_agent,
+        )
+
+        planner_task = Task(
+            description=(
+                "Create a one-day meal plan for {name}. Write breakfast, lunch, dinner, and one coaching note. "
+                "Keep it close to {calories_target} calories. Then save the plan."
+            ),
+            expected_output="A saved one-day meal plan.",
+            agent=planner_agent,
+        )
+
+        crew = Crew(
+            agents=[intake_agent, analyst_agent, planner_agent],
+            tasks=[intake_task, analyst_task, planner_task],
+            process=Process.sequential,
+            memory=True,
+            verbose=True,
+        )
+        
 except ImportError:
-    CREWAI_AVAILABLE = False
-    print("[warning] crewai not installed — skipping section 2.2")
-
-
-# ── Mock Nutrition Database ───────────────────────────────────────────────────
-NUTRITION_DB: dict[str, dict] = {
-    "apple":          {"calories": 95,  "protein_g": 0.5,  "carbs_g": 25, "fat_g": 0.3, "fibre_g": 4.4},
-    "chicken breast": {"calories": 165, "protein_g": 31.0, "carbs_g": 0,  "fat_g": 3.6, "fibre_g": 0},
-    "brown rice":     {"calories": 216, "protein_g": 5.0,  "carbs_g": 45, "fat_g": 1.8, "fibre_g": 3.5},
-    "broccoli":       {"calories": 55,  "protein_g": 3.7,  "carbs_g": 11, "fat_g": 0.6, "fibre_g": 5.1},
-    "greek yoghurt":  {"calories": 100, "protein_g": 17.0, "carbs_g": 6,  "fat_g": 0.7, "fibre_g": 0},
-    "oats":           {"calories": 150, "protein_g": 5.0,  "carbs_g": 27, "fat_g": 2.5, "fibre_g": 4.0},
-    "banana":         {"calories": 105, "protein_g": 1.3,  "carbs_g": 27, "fat_g": 0.4, "fibre_g": 3.1},
-    "salmon":         {"calories": 208, "protein_g": 28.0, "carbs_g": 0,  "fat_g": 10,  "fibre_g": 0},
-    "almonds":        {"calories": 164, "protein_g": 6.0,  "carbs_g": 6,  "fat_g": 14,  "fibre_g": 3.5},
-    "spinach":        {"calories": 23,  "protein_g": 2.9,  "carbs_g": 3.6,"fat_g": 0.4, "fibre_g": 2.2},
-}
-
-# Simple in-memory meal log (keyed by date string)
-MEAL_LOG: dict[str, list[dict]] = {}
+    pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TOOL DEFINITIONS
-# These are what Chapter 4 will contrast against Skill files.
-# A tool gives the agent *access*; a Skill gives it *judgment*.
+# 2.3 Same workflow without a framework
 # ─────────────────────────────────────────────────────────────────────────────
 
-def lookup_nutrition(food_item: str) -> str:
-    """
-    Tool: Nutrition Database Lookup
-    Returns macro-nutrient data for a given food (per standard serving).
-    """
-    key = food_item.strip().lower()
-    if key in NUTRITION_DB:
-        data = NUTRITION_DB[key]
-        return json.dumps({"food": key, **data})
-    # Fuzzy fallback: check partial matches
-    matches = [k for k in NUTRITION_DB if key in k or k in key]
-    if matches:
-        data = NUTRITION_DB[matches[0]]
-        return json.dumps({"food": matches[0], "note": f"closest match for '{food_item}'", **data})
-    return json.dumps({"error": f"'{food_item}' not found in nutrition database"})
+client = None
 
+try:
+    from openai import OpenAI
 
-def log_meal(food_item: str, quantity_g: float = 100.0, meal_type: str = "snack") -> str:
-    """
-    Tool: Meal Logger
-    Records a food entry for today's date.
-    """
-    today = datetime.date.today().isoformat()
-    entry = {
-        "food": food_item,
-        "quantity_g": quantity_g,
-        "meal_type": meal_type,
-        "timestamp": datetime.datetime.now().isoformat(),
-    }
-    MEAL_LOG.setdefault(today, []).append(entry)
-    return json.dumps({"logged": True, "entry": entry, "daily_entries": len(MEAL_LOG[today])})
+    if OPENAI_API_KEY:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+except ImportError:
+    pass
 
-
-def get_daily_summary(date_str: str | None = None) -> str:
-    """
-    Tool: Daily Nutrition Summary
-    Aggregates all logged meals for a given date (defaults to today).
-    """
-    target = date_str or datetime.date.today().isoformat()
-    entries = MEAL_LOG.get(target, [])
-    if not entries:
-        return json.dumps({"date": target, "message": "No meals logged yet."})
-
-    totals: dict[str, float] = {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fibre_g": 0}
-    for entry in entries:
-        food_data_str = lookup_nutrition(entry["food"])
-        food_data = json.loads(food_data_str)
-        if "error" not in food_data:
-            scale = entry["quantity_g"] / 100.0
-            for macro in totals:
-                totals[macro] += food_data.get(macro, 0) * scale
-
-    return json.dumps({"date": target, "entries": len(entries), "totals": {k: round(v, 1) for k, v in totals.items()}})
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2.2  CrewAI Workflow
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_crewai_diet_coach():
-    """Section 2.2: AI Diet Coach as a CrewAI single-agent crew."""
-    if not CREWAI_AVAILABLE:
-        print("crewai not installed; run: pip install crewai")
-        return
-
-    @tool("NutritionLookup")
-    def crewai_lookup(food_item: str) -> str:
-        """Look up nutritional information for a food item."""
-        return lookup_nutrition(food_item)
-
-    @tool("MealLogger")
-    def crewai_log(food_item: str, quantity_g: float = 100.0, meal_type: str = "lunch") -> str:
-        """Log a meal entry for today."""
-        return log_meal(food_item, quantity_g, meal_type)
-
-    @tool("DailySummary")
-    def crewai_summary(date_str: str = "") -> str:
-        """Get today's nutrition summary."""
-        return get_daily_summary(date_str or None)
-
-    coach_agent = Agent(
-        role="AI Diet Coach",
-        goal="Help users track nutrition and make healthier food choices",
-        backstory=(
-            "You are a certified nutrition coach with deep knowledge of macro- "
-            "and micro-nutrients. You always log meals your user mentions and "
-            "proactively surface their daily totals."
-        ),
-        tools=[crewai_lookup, crewai_log, crewai_summary],
-        verbose=True,
-    )
-
-    task = Task(
-        description=(
-            "The user says: 'I had oats for breakfast and chicken breast with "
-            "broccoli for lunch. How am I doing on protein today?'\n"
-            "1. Log both meals.\n"
-            "2. Look up nutritional data for each food.\n"
-            "3. Generate a friendly summary focusing on protein intake."
-        ),
-        expected_output="A friendly, data-backed nutrition summary with protein focus.",
-        agent=coach_agent,
-    )
-
-    crew = Crew(agents=[coach_agent], tasks=[task], process=Process.sequential, verbose=True)
-    result = crew.kickoff()
-    print("\n── CrewAI Result ──────────────────────────────────────────")
-    print(result)
-    return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2.3  Same Use Case — No Framework (raw Anthropic tool-use API)
-# ─────────────────────────────────────────────────────────────────────────────
-
-import anthropic
-
-TOOLS_SPEC = [
-    {
-        "name": "lookup_nutrition",
-        "description": "Return macro-nutrient data for a food item (per 100 g serving).",
-        "input_schema": {
-            "type": "object",
-            "properties": {"food_item": {"type": "string", "description": "Name of the food"}},
-            "required": ["food_item"],
-        },
-    },
-    {
-        "name": "log_meal",
-        "description": "Record a food entry in the daily meal log.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "food_item":   {"type": "string"},
-                "quantity_g":  {"type": "number", "description": "Quantity in grams"},
-                "meal_type":   {"type": "string", "enum": ["breakfast", "lunch", "dinner", "snack"]},
-            },
-            "required": ["food_item"],
-        },
-    },
-    {
-        "name": "get_daily_summary",
-        "description": "Return today's aggregated nutrition totals from logged meals.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"date_str": {"type": "string", "description": "ISO date (omit for today)"}},
-        },
-    },
-]
-
-TOOL_REGISTRY = {
-    "lookup_nutrition":  lookup_nutrition,
-    "log_meal":          log_meal,
-    "get_daily_summary": get_daily_summary,
-}
-
-
-def run_tool(tool_name: str, tool_input: dict) -> str:
-    """Dispatch a tool call to the correct Python function."""
-    fn = TOOL_REGISTRY.get(tool_name)
-    if fn is None:
-        return json.dumps({"error": f"Unknown tool: {tool_name}"})
-    return fn(**tool_input)
-
-
-def run_diet_coach_no_framework(user_message: str) -> str:
-    """
-    Section 2.3: The same diet coach behaviour — but using the raw
-    Anthropic Messages API with tool_use content blocks.
-
-    Agentic loop:
-        while model returns tool_use blocks:
-            execute each tool
-            append tool_results to messages
-        return final text response
-    """
-    client = anthropic.Anthropic()
-    messages = [{"role": "user", "content": user_message}]
-
-    system = (
-        "You are an AI Diet Coach. When a user mentions food they have eaten, "
-        "always log it with log_meal, look up its nutrition with lookup_nutrition, "
-        "and close with get_daily_summary. Be concise and encouraging."
-    )
-
-    print(f"\n[no-framework] User: {user_message}\n")
-
-    while True:
-        response = client.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=1024,
-            system=system,
-            tools=TOOLS_SPEC,
-            messages=messages,
-        )
-
-        # Collect text blocks for display
-        for block in response.content:
-            if block.type == "text" and block.text:
-                print(f"[assistant text] {block.text}")
-
-        if response.stop_reason == "end_turn":
-            # Final answer — extract and return text
-            final_text = " ".join(b.text for b in response.content if b.type == "text")
-            return final_text
-
-        if response.stop_reason != "tool_use":
-            break  # unexpected stop reason
-
-        # Append the assistant's full content (including tool_use blocks)
-        messages.append({"role": "assistant", "content": response.content})
-
-        # Execute each tool and build the tool_result turn
-        tool_results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                print(f"  → tool call: {block.name}({block.input})")
-                result_str = run_tool(block.name, block.input)
-                print(f"  ← result: {result_str}")
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result_str,
-                })
-
-        messages.append({"role": "user", "content": tool_results})
-
-    return "[loop ended unexpectedly]"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2.4  Boilerplate Builder: reduce repetition with a thin wrapper
-# ─────────────────────────────────────────────────────────────────────────────
-
-class DietCoachAgent:
-    """
-    Section 2.4: A minimal reusable wrapper that packages the agentic loop,
-    system prompt, and tool registry so you don't repeat the while-loop
-    in every script.
-    """
-
-    def __init__(self, model: str = "claude-opus-4-5", max_tokens: int = 1024):
-        self.client = anthropic.Anthropic()
-        self.model = model
-        self.max_tokens = max_tokens
-        self.system = (
-            "You are an AI Diet Coach with access to a nutrition database "
-            "and a meal logger. Use your tools proactively."
-        )
-        self.tools = TOOLS_SPEC
-        self.history: list[dict] = []
-
-    def chat(self, user_message: str) -> str:
-        """Send a message and run the tool loop until a final answer."""
-        self.history.append({"role": "user", "content": user_message})
-
-        while True:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=self.system,
-                tools=self.tools,
-                messages=self.history,
-            )
-
-            self.history.append({"role": "assistant", "content": response.content})
-
-            if response.stop_reason == "end_turn":
-                return " ".join(b.text for b in response.content if b.type == "text")
-
-            if response.stop_reason != "tool_use":
-                return f"[unexpected stop: {response.stop_reason}]"
-
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    result_str = run_tool(block.name, block.input)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result_str,
-                    })
-
-            self.history.append({"role": "user", "content": tool_results})
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Demo
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print("\n── Section 2.3: No-Framework Agent ───────────────────────")
-    answer = run_diet_coach_no_framework(
-        "I had oats for breakfast and chicken breast with broccoli for lunch. "
-        "How am I doing on protein today?"
-    )
-    print(f"\nFinal answer:\n{answer}")
+    print("Client profile:")
+    print(json.dumps(CLIENT_PROFILE, indent=2))
 
-    print("\n── Section 2.4: Boilerplate Builder ──────────────────────")
-    coach = DietCoachAgent()
-    reply = coach.chat("Log my dinner: salmon, 150 g. Then give me today's summary.")
-    print(f"\nCoach: {reply}")
+    if crew and OPENAI_API_KEY:
+        print("\n--- CrewAI workflow ---")
+        result = crew.kickoff(
+            inputs={
+                "name": CLIENT_PROFILE["name"],
+                "goal": CLIENT_PROFILE["goal"],
+                "dietary_preferences": CLIENT_PROFILE["dietary_preferences"],
+                "dislikes": CLIENT_PROFILE["dislikes"],
+                "calories_target": CLIENT_PROFILE["calories_target"],
+                "meals_per_day": CLIENT_PROFILE["meals_per_day"],
+                "candidate_foods": ", ".join(CLIENT_PROFILE["candidate_foods"]),
+            }
+        )
+        print(result)
+    else:
+        print("\n[CrewAI example skipped] Install crewai/crewai-tools and set OPENAI_API_KEY.")
+
+    if client and OPENAI_API_KEY:
+        print("\n--- No-framework workflow ---")
+
+        goal_template = get_goal_template(CLIENT_PROFILE["goal"])
+        food_facts = [json.loads(lookup_food(food)) for food in CLIENT_PROFILE["candidate_foods"]]
+
+        planning_brief = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": "You are a concise diet coach."},
+                {
+                    "role": "user",
+                    "content": f"""
+Interpret this client brief and write a short planning brief.
+
+Client:
+{json.dumps(CLIENT_PROFILE, indent=2)}
+
+Goal template:
+{goal_template}
+""",
+                },
+            ],
+        ).choices[0].message.content
+
+        food_shortlist = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": "You are a nutrition analyst. Use only the provided food facts."},
+                {
+                    "role": "user",
+                    "content": f"""
+Planning brief:
+{planning_brief}
+
+Food facts:
+{json.dumps(food_facts, indent=2)}
+
+Choose the best 5-7 foods and explain each choice in one short sentence.
+""",
+                },
+            ],
+        ).choices[0].message.content
+
+        meal_plan = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": "You are a practical diet coach writing simple meal plans."},
+                {
+                    "role": "user",
+                    "content": f"""
+Create a one-day meal plan for this client.
+
+Client:
+{json.dumps(CLIENT_PROFILE, indent=2)}
+
+Planning brief:
+{planning_brief}
+
+Food shortlist:
+{food_shortlist}
+
+Write:
+- Breakfast
+- Lunch
+- Dinner
+- One snack
+- One coaching note
+""",
+                },
+            ],
+        ).choices[0].message.content
+
+        save_meal_plan(CLIENT_PROFILE["name"], meal_plan)
+        print(meal_plan)
+    else:
+        print("\n[No-framework example skipped] Install openai and set OPENAI_API_KEY.")
