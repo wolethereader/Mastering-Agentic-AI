@@ -194,6 +194,14 @@ try:
     from openai import OpenAI
 
     if OPENAI_API_KEY:
+        # OpenAI is the default:
+        # OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        # DeepSeek:
+        # OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
+        # Gemini:
+        # OpenAI(api_key=os.environ.get("GEMINI_API_KEY"), base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
+        # Claude via an OpenAI-compatible provider such as OpenRouter:
+        # OpenAI(api_key=os.environ.get("OPENROUTER_API_KEY"), base_url="https://openrouter.ai/api/v1")
         client = OpenAI(api_key=OPENAI_API_KEY)
 except ImportError:
     pass
