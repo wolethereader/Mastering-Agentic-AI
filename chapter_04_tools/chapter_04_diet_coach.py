@@ -25,10 +25,48 @@ capable, trustworthy agent.
 """
 
 import json
-import asyncio
+import os
+import sys
 import inspect
+from pathlib import Path
 from typing import Any, Callable, get_type_hints
-import anthropic
+
+try:
+    import anyio
+    from mcp import ClientSession, StdioServerParameters, stdio_client
+    from mcp.server import FastMCP
+    from mcp.shared.memory import create_connected_server_and_client_session
+except ImportError:
+    anyio = None
+    ClientSession = None
+    StdioServerParameters = None
+    stdio_client = None
+    FastMCP = None
+    create_connected_server_and_client_session = None
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
+
+try:
+    from composio import Composio
+    from composio_crewai import CrewAIProvider
+except ImportError:
+    Composio = None
+    CrewAIProvider = None
+
+try:
+    from crewai import Agent, Crew, Task
+except ImportError:
+    Agent = None
+    Crew = None
+    Task = None
+
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    ChatOpenAI = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4.1  What Are Tools and How Do They Work Internally
@@ -168,113 +206,183 @@ Think of MCP as USB-C for agent tools: one standard plug, many devices.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4.4  Building an MCP Client (minimal, stdio transport)
+# 4.4  Building an MCP Client (official SDK, stdio transport)
 # ─────────────────────────────────────────────────────────────────────────────
 
-import subprocess
+MCP_SERVER_FILENAME = "diet_coach_mcp_server.py"
 
 
-class SimpleMCPClient:
-    """
-    Section 4.4: A minimal MCP client over stdio transport.
-
-    In production use the official `mcp` Python SDK:
-        pip install mcp
-    This implementation is for pedagogical clarity.
-    """
-
-    def __init__(self, server_command: list[str]):
-        self.proc = subprocess.Popen(
-            server_command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            text=True,
+def _require_mcp_sdk():
+    if anyio is None or ClientSession is None or StdioServerParameters is None or stdio_client is None:
+        raise RuntimeError(
+            "Install MCP SDK first: pip install mcp\n"
+            "This chapter's MCP client/server examples use the official SDK."
         )
-        self._id = 0
 
-    def _rpc(self, method: str, params: dict | None = None) -> dict:
-        self._id += 1
-        request = json.dumps({"jsonrpc": "2.0", "id": self._id, "method": method, "params": params or {}})
-        self.proc.stdin.write(request + "\n")      # type: ignore
-        self.proc.stdin.flush()                    # type: ignore
-        raw = self.proc.stdout.readline()          # type: ignore
-        return json.loads(raw).get("result", {})
 
-    def list_tools(self) -> list[dict]:
-        return self._rpc("tools/list").get("tools", [])
+def _tool_to_dict(tool: Any) -> dict[str, Any]:
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "input_schema": tool.inputSchema,
+    }
 
-    def call_tool(self, name: str, arguments: dict) -> Any:
-        return self._rpc("tools/call", {"name": name, "arguments": arguments})
 
-    def close(self):
-        self.proc.terminate()
+async def list_mcp_tools_async(server_script_path: str) -> list[dict[str, Any]]:
+    """
+    Section 4.4: Connect to an MCP server over stdio using the
+    official SDK, perform the required handshake, then discover tools.
+    """
+    _require_mcp_sdk()
+
+    server = StdioServerParameters(
+        command=sys.executable,
+        args=[server_script_path],
+        cwd=str(Path(server_script_path).parent),
+    )
+
+    async with stdio_client(server) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            result = await session.list_tools()
+            return [_tool_to_dict(tool) for tool in result.tools]
+
+
+async def call_mcp_tool_async(
+    server_script_path: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Section 4.4: Call an MCP tool over stdio using the official client.
+    """
+    _require_mcp_sdk()
+
+    server = StdioServerParameters(
+        command=sys.executable,
+        args=[server_script_path],
+        cwd=str(Path(server_script_path).parent),
+    )
+
+    async with stdio_client(server) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            result = await session.call_tool(tool_name, arguments)
+            text_blocks = [block.text for block in result.content if getattr(block, "type", None) == "text"]
+            return {
+                "is_error": result.isError,
+                "content": text_blocks,
+                "structured_content": result.structuredContent,
+            }
+
+
+def list_mcp_tools(server_script_path: str) -> list[dict[str, Any]]:
+    _require_mcp_sdk()
+    return anyio.run(list_mcp_tools_async, server_script_path)
+
+
+def call_mcp_tool(
+    server_script_path: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    _require_mcp_sdk()
+    return anyio.run(call_mcp_tool_async, server_script_path, tool_name, arguments)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4.5  Building an MCP Server
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def build_mcp_server():
+    """
+    Section 4.5: Build a real MCP server using the official SDK.
+
+    We keep the same nutrition domain as earlier chapters, but now expose it
+    through the MCP standard so any MCP-compatible host can discover and call
+    the tool at runtime.
+    """
+    _require_mcp_sdk()
+
+    server = FastMCP(
+        "diet-coach-nutrition",
+        instructions="Nutrition lookup tools for the AI Diet Coach.",
+    )
+
+    @server.tool(
+        name="lookup_nutrition",
+        description="Return macro-nutrient data for a food item per 100 g serving.",
+        structured_output=True,
+    )
+    def lookup_nutrition_mcp(food_item: str) -> dict[str, Any]:
+        key = food_item.strip().lower()
+        data = NUTRITION_DB.get(key)
+        if data:
+            return {"food": key, **data}
+
+        matches = [k for k in NUTRITION_DB if key in k or k in key]
+        if matches:
+            match = matches[0]
+            return {"food": match, "note": f"closest match for '{food_item}'", **NUTRITION_DB[match]}
+
+        return {"error": f"'{food_item}' not found"}
+
+    return server
+
+
 MCP_SERVER_CODE = '''#!/usr/bin/env python3
 """
 diet_coach_mcp_server.py
-A minimal MCP server that exposes the AI Diet Coach's nutrition tools.
+A real MCP server that exposes the AI Diet Coach's nutrition tools.
 Run standalone: python diet_coach_mcp_server.py
 
 Install SDK first: pip install mcp
 """
 
 import json
-import sys
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp import types
+from mcp.server import FastMCP
 
 NUTRITION_DB = {
-    "apple":          {"calories": 95,  "protein_g": 0.5,  "carbs_g": 25},
-    "chicken breast": {"calories": 165, "protein_g": 31.0, "carbs_g": 0},
-    "oats":           {"calories": 150, "protein_g": 5.0,  "carbs_g": 27},
-    "salmon":         {"calories": 208, "protein_g": 28.0, "carbs_g": 0},
+    "apple":          {"calories": 95,  "protein_g": 0.5,  "carbs_g": 25, "fat_g": 0.3, "fibre_g": 4.4},
+    "chicken breast": {"calories": 165, "protein_g": 31.0, "carbs_g": 0,  "fat_g": 3.6, "fibre_g": 0},
+    "brown rice":     {"calories": 216, "protein_g": 5.0,  "carbs_g": 45, "fat_g": 1.8, "fibre_g": 3.5},
+    "broccoli":       {"calories": 55,  "protein_g": 3.7,  "carbs_g": 11, "fat_g": 0.6, "fibre_g": 5.1},
+    "salmon":         {"calories": 208, "protein_g": 28.0, "carbs_g": 0,  "fat_g": 10,  "fibre_g": 0},
+    "oats":           {"calories": 150, "protein_g": 5.0,  "carbs_g": 27, "fat_g": 2.5, "fibre_g": 4.0},
 }
 
-server = Server("diet-coach-nutrition")
+server = FastMCP(
+    "diet-coach-nutrition",
+    instructions="Nutrition lookup tools for the AI Diet Coach.",
+)
 
-@server.list_tools()
-async def list_tools() -> list[types.Tool]:
-    return [
-        types.Tool(
-            name="lookup_nutrition",
-            description="Return macro-nutrient data for a food item.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "food_item": {"type": "string", "description": "Food name"}
-                },
-                "required": ["food_item"],
-            },
-        )
-    ]
+@server.tool(
+    name="lookup_nutrition",
+    description="Return macro-nutrient data for a food item per 100 g serving.",
+    structured_output=True,
+)
+def lookup_nutrition(food_item: str) -> dict:
+    key = food_item.strip().lower()
+    data = NUTRITION_DB.get(key)
+    if data:
+        return {"food": key, **data}
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    if name == "lookup_nutrition":
-        food = arguments.get("food_item", "").lower()
-        data = NUTRITION_DB.get(food, {"error": f"Not found: {food}"})
-        return [types.TextContent(type="text", text=json.dumps(data))]
-    raise ValueError(f"Unknown tool: {name}")
+    matches = [k for k in NUTRITION_DB if key in k or k in key]
+    if matches:
+        match = matches[0]
+        return {"food": match, "note": f"closest match for '{food_item}'", **NUTRITION_DB[match]}
 
-async def main():
-    async with stdio_server() as (r, w):
-        await server.run(r, w, server.create_initialization_options())
+    return {"error": f"'{food_item}' not found"}
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    server.run(transport="stdio")
 '''
 
 
 def write_mcp_server():
     """Write the MCP server file to disk so it can be run independently."""
-    path = "diet_coach_mcp_server.py"
+    path = Path(__file__).with_name(MCP_SERVER_FILENAME)
     with open(path, "w") as f:
         f.write(MCP_SERVER_CODE)
     print(f"MCP server written to {path}")
@@ -282,8 +390,150 @@ def write_mcp_server():
     print(f"Run server:       python {path}")
 
 
+async def verify_mcp_locally_async() -> dict[str, Any]:
+    """
+    Verify the MCP server end-to-end without spawning a subprocess.
+
+    This still uses the official MCP protocol, but connects the client and
+    server through in-memory transport so the chapter demo remains reliable.
+    """
+    _require_mcp_sdk()
+    server = build_mcp_server()
+
+    async with create_connected_server_and_client_session(server) as session:
+        tools = await session.list_tools()
+        result = await session.call_tool("lookup_nutrition", {"food_item": "oats"})
+        text_blocks = [block.text for block in result.content if getattr(block, "type", None) == "text"]
+        return {
+            "tools": [_tool_to_dict(tool) for tool in tools.tools],
+            "tool_call": {
+                "is_error": result.isError,
+                "content": text_blocks,
+                "structured_content": result.structuredContent,
+            },
+        }
+
+
+def verify_mcp_locally() -> dict[str, Any]:
+    _require_mcp_sdk()
+    return anyio.run(verify_mcp_locally_async)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 4.6  Tools vs Skills — the core contrast of this chapter
+# 4.6  Composio and Other Tooling Ecosystems
+# ─────────────────────────────────────────────────────────────────────────────
+
+COMPOSIO_EXPLAINER = """
+COMPOSIO — Managed Tooling Ecosystem
+
+Where MCP standardises HOW tools are exposed, Composio helps you
+ACCESS many real-world integrations without wiring each API yourself.
+
+Typical workflow:
+  1. Create or reuse an auth config for a toolkit (e.g. GitHub)
+  2. Link a user account to that toolkit
+  3. Fetch provider-formatted tools for your framework
+  4. Give those tools to an agent
+
+This reduces boilerplate around authentication, schemas, and execution.
+"""
+
+
+def _require_composio_sdk():
+    if Composio is None or CrewAIProvider is None:
+        raise RuntimeError(
+            "Install Composio first: pip install composio composio_crewai\n"
+            "This chapter's Composio example uses the current provider-based SDK."
+        )
+
+
+def create_composio_github_auth_link(
+    user_id: str,
+    auth_config_id: str,
+    callback_url: str | None = None,
+) -> str:
+    """
+    Create a Composio connection link so a user can connect GitHub.
+
+    Args:
+        user_id: Your application's user identifier.
+        auth_config_id: The Composio auth config ID (for example: ac_xxx).
+        callback_url: Optional redirect URL after the auth flow completes.
+
+    Returns:
+        str: A redirect URL the user can open to complete authentication.
+    """
+    _require_composio_sdk()
+
+    composio = Composio()
+    request = composio.connected_accounts.link(
+        user_id=user_id,
+        auth_config_id=auth_config_id,
+        callback_url=callback_url,
+    )
+    return request.redirect_url
+
+
+def get_composio_github_tools(user_id: str = "default") -> list[Any]:
+    """
+    Fetch GitHub tools from Composio, already formatted for CrewAI.
+
+    Note:
+        The user must have an authenticated GitHub connection in Composio.
+    """
+    _require_composio_sdk()
+
+    composio = Composio(provider=CrewAIProvider())
+    return composio.tools.get(
+        user_id=user_id,
+        toolkits=["GITHUB"],
+    )
+
+
+def build_composio_github_crew(user_id: str = "default") -> Any:
+    """
+    Build a small CrewAI example using Composio's GitHub toolkit.
+
+    This is optional chapter code: it requires Composio auth plus an OpenAI
+    key for the CrewAI LLM wrapper shown in current Composio docs.
+    """
+    _require_composio_sdk()
+
+    if Agent is None or Crew is None or Task is None:
+        raise RuntimeError("Install CrewAI first: pip install crewai")
+
+    if ChatOpenAI is None:
+        raise RuntimeError("Install langchain-openai first: pip install langchain-openai")
+
+    tools = get_composio_github_tools(user_id=user_id)
+    llm = ChatOpenAI()
+
+    github_agent = Agent(
+        role="GitHub Research Agent",
+        goal="Understand recent activity in a GitHub repository",
+        backstory=(
+            "An expert developer agent that inspects repositories, "
+            "reads commits and pull requests, and summarises changes."
+        ),
+        verbose=True,
+        tools=tools,
+        llm=llm,
+    )
+
+    task = Task(
+        description=(
+            "Inspect the latest activity in a GitHub repository and produce "
+            "a short summary of what changed."
+        ),
+        expected_output="A concise summary of recent repository activity.",
+        agent=github_agent,
+    )
+
+    return Crew(agents=[github_agent], tasks=[task])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tools vs Skills — the core contrast of this chapter
 # ─────────────────────────────────────────────────────────────────────────────
 
 SKILL_VS_TOOL_EXPLAINER = """
@@ -310,8 +560,6 @@ The TOOL gives the coach something real to say.
 # Full agent: SKILL-guided tool use
 # ─────────────────────────────────────────────────────────────────────────────
 
-from pathlib import Path
-
 SKILL_PATH = Path(__file__).parent.parent / "chapter_03_prompting" / "SKILL.md"
 
 TOOLS = [TOOL_LOOKUP_AUTO, tool_from_function(suggest_meal)]
@@ -323,6 +571,9 @@ def run_skill_guided_agent(user_message: str) -> str:
     The Diet Coach using BOTH the SKILL (system prompt) and TOOLS (API).
     This is the fullest version of the coach so far.
     """
+    if anthropic is None:
+        raise RuntimeError("Install anthropic first: pip install anthropic")
+
     client = anthropic.Anthropic()
 
     skill_text = SKILL_PATH.read_text() if SKILL_PATH.exists() else ""
@@ -375,12 +626,36 @@ if __name__ == "__main__":
     print("\n── Auto-generated tool schemas ──────────────────────────────")
     print(json.dumps(TOOL_LOOKUP_AUTO, indent=2))
 
-    print("\n── Chapter 4 Agent: Skill-Guided Tool Use ───────────────────")
-    answer = run_skill_guided_agent(
-        "I want to build more muscle. What should I eat for dinner tonight? "
-        "I want something under 500 calories and high in protein."
-    )
-    print(f"Coach: {answer}")
+    print("\n── MCP Verification (local protocol round-trip) ─────────────")
+    try:
+        verification = verify_mcp_locally()
+        print(json.dumps(verification, indent=2))
+    except Exception as exc:
+        print(f"MCP demo skipped: {exc}")
 
     print("\n── MCP Server (write to disk) ────────────────────────────────")
     write_mcp_server()
+
+    print("\n── Composio Toolkit Example ─────────────────────────────────")
+    print(COMPOSIO_EXPLAINER)
+    if Composio is not None and CrewAIProvider is not None and os.getenv("COMPOSIO_API_KEY"):
+        github_user_id = os.getenv("COMPOSIO_USER_ID", "default")
+        try:
+            github_tools = get_composio_github_tools(user_id=github_user_id)
+            print(f"Fetched {len(github_tools)} GitHub tool(s) for user_id='{github_user_id}'.")
+            print("You can now attach these tools to a CrewAI agent with build_composio_github_crew(...).")
+        except Exception as exc:
+            print(f"Composio demo skipped: {exc}")
+    else:
+        print("Skipping Composio demo. Install `composio` + `composio_crewai` and set `COMPOSIO_API_KEY`.")
+
+    if anthropic is not None and os.getenv("ANTHROPIC_API_KEY"):
+        print("\n── Chapter 4 Agent: Skill-Guided Tool Use ───────────────────")
+        answer = run_skill_guided_agent(
+            "I want to build more muscle. What should I eat for dinner tonight? "
+            "I want something under 500 calories and high in protein."
+        )
+        print(f"Coach: {answer}")
+    else:
+        print("\n── Chapter 4 Agent: Skill-Guided Tool Use ───────────────────")
+        print("Skipping agent demo. Install `anthropic` and set `ANTHROPIC_API_KEY` to run it.")
