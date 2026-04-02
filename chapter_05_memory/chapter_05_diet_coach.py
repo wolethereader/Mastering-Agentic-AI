@@ -8,10 +8,15 @@ Sections covered:
   5.3  Introduction to RAG and GraphRAG
   5.4  State-of-the-Art Memory Architectures
   5.5  Giving Our AI Diet Coach a Memory
+  5.6  Context Engineering
 
 Memory is what turns a stateless model into a
 personalised agent. Without memory, the coach asks the same questions
 every session. With memory, it tracks progress over weeks.
+
+Context engineering — Section 5.6 — is the complementary discipline:
+memory stores answer WHAT the agent knows; context engineering answers
+WHAT the model sees right now, in what order, and at what level of detail.
 
 Memory taxonomy used throughout this chapter:
   • In-context     — conversation history in the current context window
@@ -25,7 +30,7 @@ import datetime
 import hashlib
 from pathlib import Path
 from typing import Any
-import anthropic
+from openai import OpenAI
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5.2  Types of Memory — concrete implementations
@@ -160,8 +165,8 @@ class MemoryEnabledDietCoach:
       ✓ Procedural — SKILL.md assessment protocol (Chapter 3)
     """
 
-    def __init__(self, user_id: str, model: str = "claude-opus-4-5"):
-        self.client      = anthropic.Anthropic()
+    def __init__(self, user_id: str, model: str = "gpt-4o-mini"):
+        self.client      = OpenAI()
         self.model       = model
         self.user_id     = user_id
         self.semantic    = SemanticMemory(user_id)
@@ -200,14 +205,15 @@ class MemoryEnabledDietCoach:
     def chat(self, user_message: str) -> str:
         self.in_context.add("user", user_message)
 
-        response = self.client.messages.create(
+        # Build messages with system prompt prepended — OpenAI convention
+        system_msg = {"role": "system", "content": self._build_system_prompt(user_message)}
+        response = self.client.chat.completions.create(
             model=self.model,
             max_tokens=1024,
-            system=self._build_system_prompt(user_message),
-            messages=self.in_context.get_window(),
+            messages=[system_msg, *self.in_context.get_window()],
         )
 
-        reply = response.content[0].text
+        reply = response.choices[0].message.content
         self.in_context.add("assistant", reply)
         return reply
 
@@ -221,6 +227,145 @@ class MemoryEnabledDietCoach:
         """Persist the session to episodic memory."""
         self.episodic.add_episode(summary, insights, goal)
         print(f"[memory] Session saved for {self.user_id}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.6  Context Engineering
+#
+# Memory stores — semantic, episodic, in-context — answer WHAT the agent
+# knows. Context engineering answers a different question: WHAT does the
+# model see right now, in what order, and at what level of detail?
+#
+# Every token in the context window is a decision. The function below
+# assembles that window deliberately:
+#
+#   Layer 0: Skill protocol    — injected via system prompt (not here)
+#   Layer 1: User profile      — stable facts; injected first as background
+#   Layer 2: Recent meals      — dynamic, recency-weighted; last 3 only
+#   Layer 3: Current message   — always last; highest attention weight
+#
+# The fake assistant acknowledgement turns ("Understood — I have your
+# profile loaded.") are a priming technique: they condition the model to
+# treat the injected context as already processed rather than summarising
+# it back to the user.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Load the Skill text once at module level so build_context_window can
+# reference it as a default argument — consistent with how MemoryEnabledDietCoach
+# loads it via SKILL_PATH.
+NUTRITION_ASSESSMENT_SKILL: str = (
+    SKILL_PATH.read_text() if SKILL_PATH.exists() else ""
+)
+
+
+def build_context_window(
+    user_message: str,
+    meal_history: list[dict] | None = None,
+    user_profile: dict | None = None,
+    skill_text: str = NUTRITION_ASSESSMENT_SKILL,
+) -> list[dict]:
+    """
+    Section 5.6: Assemble the message list the model will see.
+
+    Treats every token as a deliberate decision rather than passing
+    everything into the context and hoping the model pays attention
+    to the right things.
+
+    Args:
+        user_message:  The user's current input — always the final message.
+        meal_history:  Full meal log; only the last 3 entries are included.
+        user_profile:  Dict of user facts (weight, goal, restrictions, etc.).
+        skill_text:    The Nutrition Assessment Skill protocol from SKILL.md.
+                       Defaults to the module-level constant; override for
+                       testing without hitting disk.
+
+    Returns:
+        A list of message dicts in OpenAI API format, ordered so the
+        model's attention naturally falls on the most relevant context.
+    """
+    messages: list[dict] = []
+
+    # Layer 1 — User profile (stable background context)
+    # Injected first because it changes rarely and provides the frame
+    # for everything that follows. The synthetic assistant reply primes
+    # the model to treat this as already-acknowledged context rather
+    # than something it needs to summarise or repeat back.
+    if user_profile:
+        profile_note = f"[Context] User profile:\n{json.dumps(user_profile, indent=2)}"
+        messages.append({"role": "user",      "content": profile_note})
+        messages.append({"role": "assistant", "content": "Understood — I have your profile loaded."})
+
+    # Layer 2 — Recent meals (dynamic, recency-weighted)
+    # Limit to the last 3 entries: older entries are noise, not signal.
+    # Sending the full meal log would consume tokens without improving
+    # the model's reasoning — the "lost in the middle" problem means
+    # information buried deep in long contexts receives less attention.
+    if meal_history:
+        recent = meal_history[-3:]
+        history_note = (
+            "Recent meals logged:\n"
+            + "\n".join(
+                f"  - {m.get('food', '?')} ({m.get('meal_type', '?')})"
+                for m in recent
+            )
+        )
+        messages.append({"role": "user",      "content": history_note})
+        messages.append({"role": "assistant", "content": "Got it — I'll factor in your recent meals."})
+
+    # Layer 3 — Current user message (always last, always highest weight)
+    # Recency bias in attention means this placement matters. The model
+    # weighs recent tokens more heavily; the user's actual question
+    # should be the last thing it sees before generating a response.
+    messages.append({"role": "user", "content": user_message})
+    return messages
+
+
+def demonstrate_context_engineering() -> None:
+    """
+    Section 5.6: Show build_context_window in action alongside
+    MemoryEnabledDietCoach, demonstrating how memory stores feed
+    into context assembly.
+    """
+    user_profile = {
+        "name":           "Jordan",
+        "age":            32,
+        "weight_kg":      78,
+        "goal":           "Lose 5 kg over 3 months",
+        "restrictions":   "Lactose intolerant",
+        "activity_level": "Runs 3x per week",
+    }
+
+    meal_history = [
+        {"food": "oats with banana",       "meal_type": "breakfast"},
+        {"food": "chicken salad",          "meal_type": "lunch"},
+        {"food": "salmon with brown rice", "meal_type": "dinner"},
+        {"food": "apple",                  "meal_type": "snack"},   # dropped: > last 3
+        {"food": "eggs and smoked salmon", "meal_type": "breakfast"},
+    ]
+
+    messages = build_context_window(
+        user_message="How am I doing on protein today?",
+        meal_history=meal_history,
+        user_profile=user_profile,
+    )
+
+    print("── Context window assembled (" + str(len(messages)) + " messages) ──")
+    for i, msg in enumerate(messages):
+        content_preview = (
+            msg["content"][:80] + "..."
+            if len(msg["content"]) > 80
+            else msg["content"]
+        )
+        print(f"  [{i}] {msg['role']:10s} | {content_preview}")
+    print()
+    print("Layer breakdown:")
+    print("  Messages 0–1 : Layer 1 — user profile (stable background)")
+    print("  Messages 2–3 : Layer 2 — last 3 meals (oats, chicken salad, eggs)")
+    print("  Message  4   : Layer 3 — current question (highest attention weight)")
+    print()
+    print("Note: the apple snack was excluded — it fell outside the last-3 window.")
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,3 +405,7 @@ if __name__ == "__main__":
         insights=["Responded well to concrete meal suggestions", "Morning routine is the highest-leverage window"],
         goal="Continue 30 g protein at breakfast and add a mid-afternoon snack.",
     )
+
+    # ── Section 5.6: Context Engineering ────────────────────────────────────
+    print("\n── Section 5.6: Context Engineering ───────────────────────")
+    demonstrate_context_engineering()
