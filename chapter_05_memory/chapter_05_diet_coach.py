@@ -23,6 +23,11 @@ Memory taxonomy used throughout this chapter:
   • Episodic       — past session summaries retrieved from a store
   • Semantic       — facts about the user (profile, preferences)
   • Procedural     — skills and workflows (SKILL.md from Chapter 3)
+
+New additions (Sections 5.2a, 5.4a, 5.6a):
+  • Compaction     — compress history rather than just truncating it
+  • Writable skills — procedural memory the agent can update from experience
+  • Ephemeral ctx  — context assembled fresh each turn, never stored
 """
 
 import json
@@ -129,6 +134,99 @@ class InContextMemory:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 5.2a  Compaction — When the Window Fills
+#
+# Sliding the window drops old turns but loses their information entirely.
+# Compaction is an alternative: compress the history before it overflows,
+# preserving meaning while reducing token count.
+#
+# Three patterns cover most cases:
+#
+#   1. Result-only  — keep outcomes, discard working details.
+#      Coding agent: drop the compiler log, keep "compile successful".
+#      Research agent: drop training curves, keep the validation loss.
+#
+#   2. LLM summarisation — when results cannot be reduced to a single value,
+#      use a separate model call to compress the history into a few sentences.
+#
+#   3. Ephemeral context — some information is critical now but useless
+#      next turn. Append it to the context for this iteration only and
+#      never write it into history. See Section 5.6a for the full pattern.
+#
+# The Diet Coach already uses compaction implicitly:
+#   • EpisodicMemory stores distilled summaries, not raw transcripts.
+#   • build_context_window includes only the last 3 meals, not the full log.
+# These are result-only compaction decisions — this section names the pattern.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compact_history_result_only(
+    history: list[dict],
+    result_roles: tuple[str, ...] = ("assistant",),
+) -> list[dict]:
+    """
+    Section 5.2a: Result-only compaction — keep the outcome of each
+    exchange and strip intermediate working detail.
+
+    In this simplified version, every assistant turn is kept (it is the
+    "result") while any tool/function intermediate turns are discarded.
+    In a real coding or research agent, you would add logic to strip
+    verbose logs from within assistant content too.
+
+    Args:
+        history:      Full turn history as a list of role/content dicts.
+        result_roles: Roles considered "results" worth keeping.
+
+    Returns:
+        Compacted history containing only result-role turns.
+    """
+    return [msg for msg in history if msg.get("role") in result_roles]
+
+
+def compact_history_llm_summary(
+    history: list[dict],
+    client: OpenAI,
+    model: str = "gpt-4o-mini",
+) -> list[dict]:
+    """
+    Section 5.2a: LLM-summarisation compaction — compress the full history
+    into a single system message when the context is too long to truncate
+    cleanly.
+
+    Use this when result-only compaction would lose important reasoning
+    steps, or when the history spans many heterogeneous topic shifts.
+
+    Args:
+        history: Full turn history to compress.
+        client:  OpenAI client (already initialised).
+        model:   Model to use for summarisation.
+
+    Returns:
+        A single-element list containing a system message with the summary.
+    """
+    if not history:
+        return []
+
+    transcript = "\n".join(
+        f"{m['role'].upper()}: {str(m['content'])[:300]}"
+        for m in history
+    )
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=200,
+        messages=[{
+            "role": "user",
+            "content": (
+                "Summarise this conversation in 2–3 sentences. "
+                "Retain only facts needed to continue the coaching session:\n\n"
+                + transcript
+            ),
+        }],
+    )
+    summary = response.choices[0].message.content.strip()
+    return [{"role": "system", "content": f"[Compacted history] {summary}"}]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 5.3  RAG — retrieve relevant episodes using simple cosine similarity
 #          (production: use embeddings + vector DB)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +246,72 @@ def naive_keyword_retrieval(query: str, episodes: list[dict], top_k: int = 2) ->
         scored.append((overlap, ep))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [ep for _, ep in scored[:top_k] if _ > 0]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.4a  Writable Skills — Procedural Memory the Agent Can Update
+#
+# Procedural memory (SKILL.md) is the one memory type the agent can rewrite.
+# Semantic, episodic, and in-context memory are all written by the surrounding
+# system — they record what happened. Procedural memory records HOW the agent
+# should think — and that is something the agent can update from experience.
+#
+# A skill is just a text file. If the agent observes that a different approach
+# consistently produces better outcomes, it can write a revised instruction
+# into SKILL.md. The change propagates to every future session with no
+# fine-tuning, no gradient updates, and no redeployment. Just a file write.
+#
+# This is the foundation for self-evolving agents (see Chapter 9).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def read_skill(skill_path: Path) -> str:
+    """
+    Section 5.4a: Load the current procedural skill from disk.
+    Returns an empty string if the file does not exist yet.
+    """
+    return skill_path.read_text(encoding="utf-8") if skill_path.exists() else ""
+
+
+def update_skill(
+    skill_path: Path,
+    new_content: str,
+    backup: bool = True,
+) -> None:
+    """
+    Section 5.4a: Overwrite the skill file with updated content.
+
+    The agent calls this after a session to refine its own reasoning
+    protocol based on what worked. If backup=True, the previous version
+    is saved to SKILL.md.bak before overwriting, enabling rollback.
+
+    Args:
+        skill_path:  Path to the SKILL.md file.
+        new_content: The full updated skill text.
+        backup:      Whether to save the previous version first.
+    """
+    skill_path.parent.mkdir(parents=True, exist_ok=True)
+    if backup and skill_path.exists():
+        bak = skill_path.with_suffix(".md.bak")
+        bak.write_text(skill_path.read_text(encoding="utf-8"), encoding="utf-8")
+    skill_path.write_text(new_content, encoding="utf-8")
+    print(f"[skill] Updated: {skill_path}")
+
+
+def append_skill_note(skill_path: Path, note: str) -> None:
+    """
+    Section 5.4a: Append a short observation to the existing skill rather
+    than replacing it. Useful for adding a learned heuristic without
+    rewriting the whole protocol.
+
+    Example:
+        append_skill_note(SKILL_PATH,
+            "Observation: users respond better when activity level is "
+            "established before discussing dietary deficits.")
+    """
+    current = read_skill(skill_path)
+    updated = current.rstrip() + f"\n\n# Agent observation\n{note.strip()}\n"
+    update_skill(skill_path, updated, backup=True)
+    print(f"[skill] Note appended to {skill_path.name}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -307,7 +471,160 @@ def build_context_window(
     return messages
 
 
-def demonstrate_context_engineering() -> None:
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.6a  Ephemeral Context — Use It Once, Discard It
+#
+# build_context_window already uses ephemeral context implicitly: meal
+# history and the user profile are assembled fresh on every call and are
+# never written into the in-context window. This section names and
+# generalises the pattern.
+#
+# Ephemeral context is information that is:
+#   • Critical for the current generation turn
+#   • Not useful in subsequent turns (stale, changes rapidly, or one-off)
+#
+# It appears in the context window for one iteration, influences generation,
+# and is NOT carried forward into token history.
+#
+# Contrast with:
+#   • In-context memory  — persists turn-to-turn within a session
+#   • Semantic memory    — persists across sessions (user profile)
+#   • Episodic memory    — persists across sessions (session summaries)
+#
+# Decision rule: if the data changes faster than the conversation does,
+# make it ephemeral. Meal history today ≠ meal history last Tuesday.
+# The user's name does not change — it belongs in semantic memory.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_context_window_with_ephemeral(
+    user_message: str,
+    in_context_window: list[dict],
+    meal_history: list[dict] | None = None,
+    user_profile: dict | None = None,
+    situational_data: dict | None = None,
+    skill_text: str = NUTRITION_ASSESSMENT_SKILL,
+) -> list[dict]:
+    """
+    Section 5.6a: Extended version of build_context_window that makes
+    the ephemeral/stored distinction explicit.
+
+    Ephemeral layers (assembled fresh, never stored in in_context_window):
+        • user_profile     — re-fetched from SemanticMemory each call
+        • meal_history[-3] — recency-weighted, stale by next turn
+        • situational_data — any real-time signal (location, time, device)
+
+    Stored layer (passed in from InContextMemory.get_window()):
+        • in_context_window — the actual conversation turns
+
+    The caller is responsible for appending only the assistant reply to
+    in_context_window after generation — NOT the ephemeral layers.
+
+    Args:
+        user_message:      Current user input — always the final message.
+        in_context_window: Recent conversation turns from InContextMemory.
+        meal_history:      Full meal log; last 3 entries used (ephemeral).
+        user_profile:      User facts from SemanticMemory.all() (ephemeral).
+        situational_data:  Any real-time context dict, e.g. current time,
+                           location, or device state (ephemeral).
+        skill_text:        Procedural skill from SKILL.md.
+
+    Returns:
+        Full message list for the API call — ephemeral layers + stored window
+        + current query, in attention-optimised order.
+    """
+    messages: list[dict] = []
+
+    # ── Ephemeral Layer 1: stable user facts (re-fetched each call) ──────────
+    if user_profile:
+        profile_note = f"[Context] User profile:\n{json.dumps(user_profile, indent=2)}"
+        messages.append({"role": "user",      "content": profile_note})
+        messages.append({"role": "assistant", "content": "Understood — I have your profile loaded."})
+
+    # ── Ephemeral Layer 2: recent meals (last 3, re-assembled each call) ─────
+    if meal_history:
+        recent = meal_history[-3:]
+        history_note = (
+            "Recent meals logged:\n"
+            + "\n".join(
+                f"  - {m.get('food', '?')} ({m.get('meal_type', '?')})"
+                for m in recent
+            )
+        )
+        messages.append({"role": "user",      "content": history_note})
+        messages.append({"role": "assistant", "content": "Got it — I'll factor in your recent meals."})
+
+    # ── Ephemeral Layer 3: situational data (real-time signal, one-off) ──────
+    if situational_data:
+        situation_note = (
+            "[Situational context — valid for this turn only]\n"
+            + json.dumps(situational_data, indent=2)
+        )
+        messages.append({"role": "user",      "content": situation_note})
+        messages.append({"role": "assistant", "content": "Noted — I'll use this for my response."})
+
+    # ── Stored layer: actual conversation turns from InContextMemory ──────────
+    # These ARE stored in in_context_window between turns — unlike the above.
+    messages.extend(in_context_window)
+
+    # ── Current query: always last, highest attention weight ──────────────────
+    messages.append({"role": "user", "content": user_message})
+    return messages
+
+
+def demonstrate_ephemeral_context() -> None:
+    """
+    Section 5.6a: Show the ephemeral/stored distinction in practice.
+
+    Runs two turns of a conversation. After each turn, only the assistant
+    reply is added to the in-context window — the ephemeral layers (profile,
+    meals, situational data) are re-assembled fresh on every call.
+    """
+    from openai import OpenAI
+
+    client = OpenAI()
+    in_context: list[dict] = []   # stored — grows turn by turn
+
+    user_profile = {"name": "Jordan", "goal": "Lose 5 kg", "restrictions": "Lactose intolerant"}
+    meal_history = [
+        {"food": "oats",   "meal_type": "breakfast"},
+        {"food": "salmon", "meal_type": "dinner"},
+    ]
+
+    for turn, user_message in enumerate([
+        "How am I doing on protein today?",
+        "What should I eat tomorrow morning?",
+    ], start=1):
+        situational_data = {"current_time": "19:30", "day_of_week": "Tuesday"}
+
+        # Build context — ephemeral layers assembled fresh every call
+        messages = build_context_window_with_ephemeral(
+            user_message=user_message,
+            in_context_window=in_context,
+            meal_history=meal_history,
+            user_profile=user_profile,
+            situational_data=situational_data,
+        )
+
+        system_msg = {"role": "system", "content": "You are an AI Diet Coach."}
+        response = client.chat.completions.create(
+            model="gpt-4o-mini", max_tokens=150,
+            messages=[system_msg, *messages],
+        )
+        reply = response.choices[0].message.content.strip()
+
+        # Only the user message and reply enter in_context — NOT ephemeral layers
+        in_context.append({"role": "user",      "content": user_message})
+        in_context.append({"role": "assistant", "content": reply})
+
+        print(f"Turn {turn}")
+        print(f"  User:  {user_message}")
+        print(f"  Coach: {reply[:120]}...")
+        print(f"  in_context turns stored: {len(in_context) // 2}")
+        print(f"  Ephemeral layers used this turn: profile + meals + situational")
+        print()
+
+
+
     """
     Section 5.6: Show build_context_window in action,
     demonstrating how memory stores feed into context assembly.
@@ -369,6 +686,32 @@ if __name__ == "__main__":
     reply2 = chat_turn("What should I have for dinner?", USER_ID)
     print(f"Coach: {reply2}\n")
 
+    # ── Section 5.2a: Compaction ─────────────────────────────────────────────
+    print("\n── Section 5.2a: Compaction ────────────────────────────────")
+    sample_history = [
+        {"role": "user",      "content": "What should I eat for breakfast?"},
+        {"role": "assistant", "content": "Try eggs and smoked salmon — high protein."},
+        {"role": "user",      "content": "What about lunch?"},
+        {"role": "assistant", "content": "A chicken salad would keep you on track."},
+    ]
+    compacted = compact_history_result_only(sample_history)
+    print(f"Original turns: {len(sample_history)}, After result-only compaction: {len(compacted)}")
+    for msg in compacted:
+        print(f"  [{msg['role']}] {msg['content'][:60]}")
+
+    # ── Section 5.4a: Writable Skills ────────────────────────────────────────
+    print("\n── Section 5.4a: Writable Skills ───────────────────────────")
+    skill_path = Path(".memory/demo_SKILL.md")
+    skill_path.parent.mkdir(exist_ok=True)
+    skill_path.write_text("# Demo Skill\nStep 1: Establish baseline.\nStep 2: Identify deficits.\n")
+    print(f"Before: {skill_path.read_text().strip()}")
+    append_skill_note(skill_path, "Users respond better when activity level is asked first.")
+    print(f"After:  {skill_path.read_text().strip()}")
+
     # ── Section 5.6: Context Engineering ────────────────────────────────────
     print("\n── Section 5.6: Context Engineering ───────────────────────")
     demonstrate_context_engineering()
+
+    # ── Section 5.6a: Ephemeral Context ─────────────────────────────────────
+    print("\n── Section 5.6a: Ephemeral Context ─────────────────────────")
+    demonstrate_ephemeral_context()
