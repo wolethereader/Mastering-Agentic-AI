@@ -26,7 +26,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-import anthropic
+from openai import OpenAI
 import dspy
 from dspy.teleprompt import MIPROv2
 from dotenv import load_dotenv
@@ -308,7 +308,7 @@ def run_structured_assessment(user_profile: dict) -> dict:
     Section 3.5: Ask the model to return a JSON assessment that conforms
     to our schema — avoiding free-text parsing entirely.
     """
-    client = anthropic.Anthropic()
+    client = OpenAI()
 
     prompt = (
         f"User profile: {json.dumps(user_profile, indent=2)}\n\n"
@@ -318,14 +318,16 @@ def run_structured_assessment(user_profile: dict) -> dict:
         "No markdown fences. No extra keys. Pure JSON."
     )
 
-    response = client.messages.create(
-        model="claude-opus-4-5",
+    response = client.chat.completions.create(
+        model="gpt-4.1-nano",
         max_tokens=1024,
-        system=build_system_prompt(),
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": build_system_prompt()},
+            {"role": "user", "content": prompt},
+        ],
     )
 
-    raw = response.content[0].text.strip()
+    raw = response.choices[0].message.content.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\n?", "", raw).rstrip("`").strip()
 

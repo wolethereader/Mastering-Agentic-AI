@@ -29,8 +29,11 @@ import json
 import datetime
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Dict
 from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5.2  Types of Memory — concrete implementations
@@ -148,85 +151,67 @@ def naive_keyword_retrieval(query: str, episodes: list[dict], top_k: int = 2) ->
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5.5  AI Diet Coach with Full Memory
+# 5.5  Memory for our Diet Coach (LangChain + Mem0)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SKILL_PATH = Path(__file__).parent.parent / "chapter_03_prompting" / "SKILL.md"
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from mem0 import MemoryClient
+
+# Step 1: Initialise the model and memory client
+llm = ChatOpenAI(model="gpt-4.1-nano")
+memory_client = MemoryClient()
+
+# Step 2: Prompt with a reserved slot for memory-derived context
+prompt = ChatPromptTemplate.from_messages([
+    SystemMessage(content="""
+You are a helpful AI Diet Coach.
+Use the provided context to remember user preferences, dietary restrictions,
+and long-term goals. Base your recommendations on this information.
+"""),
+    MessagesPlaceholder(variable_name="context"),
+    HumanMessage(content="{input}")
+])
 
 
-class MemoryEnabledDietCoach:
-    """
-    Section 5.5: The Diet Coach now remembers you.
+def retrieve_context(query: str, user_id: str) -> List[Dict]:
+    """Step 3: Retrieve relevant memories for the current query."""
+    memories = memory_client.search(query, user_id=user_id)
+    if not memories.get("results"):
+        return [{"role": "user", "content": query}]
+    serialized = " ".join(memory["memory"] for memory in memories["results"])
+    return [
+        {"role": "system", "content": f"Relevant user information: {serialized}"},
+        {"role": "user", "content": query}
+    ]
 
-    Memory layers active:
-      ✓ Semantic   — your profile (weight, goals, restrictions)
-      ✓ Episodic   — past session summaries (RAG-retrieved)
-      ✓ In-context — this conversation's history
-      ✓ Procedural — SKILL.md assessment protocol (Chapter 3)
-    """
 
-    def __init__(self, user_id: str, model: str = "gpt-4o-mini"):
-        self.client      = OpenAI()
-        self.model       = model
-        self.user_id     = user_id
-        self.semantic    = SemanticMemory(user_id)
-        self.episodic    = EpisodicMemory(user_id)
-        self.in_context  = InContextMemory(max_turns=20)
-        self.skill_text  = SKILL_PATH.read_text() if SKILL_PATH.exists() else ""
+def generate_response(user_input: str, context: List[Dict]) -> str:
+    """Step 4: Pass assembled context to the LLM."""
+    chain = prompt | llm
+    response = chain.invoke({
+        "context": context,
+        "input": user_input
+    })
+    return response.content
 
-    def _build_system_prompt(self, query: str) -> str:
-        # RAG: retrieve relevant past episodes
-        all_episodes   = self.episodic._episodes
-        relevant_eps   = naive_keyword_retrieval(query, all_episodes, top_k=2)
-        retrieved_text = ""
-        if relevant_eps:
-            retrieved_text = "\nRelevant past sessions (retrieved):\n"
-            for ep in relevant_eps:
-                retrieved_text += f"  [{ep['date']}] {ep['summary']}\n"
 
-        return f"""You are an AI Diet Coach with persistent memory.
+def save_interaction(user_id: str, user_input: str, assistant_response: str):
+    """Step 5: Persist the interaction back into Mem0."""
+    interaction = [
+        {"role": "user", "content": user_input},
+        {"role": "assistant", "content": assistant_response}
+    ]
+    memory_client.add(interaction, user_id=user_id)
 
-[Nutrition Assessment Skill]
-{self.skill_text}
 
-[User Profile — Semantic Memory]
-{self.semantic.as_context_string()}
-
-[Session History — Episodic Memory]
-{self.episodic.as_context_string(n=3)}
-{retrieved_text}
-[Instructions]
-- Greet returning users by name and reference their last goal if known.
-- When the user mentions a new food or meal, note it.
-- At the end of the conversation, summarise key insights for episode storage.
-- Never ask for information already in the semantic memory.
-"""
-
-    def chat(self, user_message: str) -> str:
-        self.in_context.add("user", user_message)
-
-        # Build messages with system prompt prepended — OpenAI convention
-        system_msg = {"role": "system", "content": self._build_system_prompt(user_message)}
-        response = self.client.chat.completions.create(
-            model=self.model,
-            max_tokens=1024,
-            messages=[system_msg, *self.in_context.get_window()],
-        )
-
-        reply = response.choices[0].message.content
-        self.in_context.add("assistant", reply)
-        return reply
-
-    def update_profile(self, **kwargs: Any) -> None:
-        """Store user facts in semantic memory."""
-        for key, value in kwargs.items():
-            self.semantic.set(key, value)
-        print(f"[memory] Profile updated: {list(kwargs.keys())}")
-
-    def save_session(self, summary: str, insights: list[str], goal: str | None = None) -> None:
-        """Persist the session to episodic memory."""
-        self.episodic.add_episode(summary, insights, goal)
-        print(f"[memory] Session saved for {self.user_id}")
+def chat_turn(user_input: str, user_id: str) -> str:
+    """Step 6: A single conversation turn — retrieve, generate, persist."""
+    context = retrieve_context(user_input, user_id)
+    response = generate_response(user_input, context)
+    save_interaction(user_id, user_input, response)
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -253,6 +238,8 @@ class MemoryEnabledDietCoach:
 # Load the Skill text once at module level so build_context_window can
 # reference it as a default argument — consistent with how MemoryEnabledDietCoach
 # loads it via SKILL_PATH.
+SKILL_PATH = Path(__file__).parent.parent / "chapter_03_prompting" / "SKILL.md"
+
 NUTRITION_ASSESSMENT_SKILL: str = (
     SKILL_PATH.read_text() if SKILL_PATH.exists() else ""
 )
@@ -322,9 +309,8 @@ def build_context_window(
 
 def demonstrate_context_engineering() -> None:
     """
-    Section 5.6: Show build_context_window in action alongside
-    MemoryEnabledDietCoach, demonstrating how memory stores feed
-    into context assembly.
+    Section 5.6: Show build_context_window in action,
+    demonstrating how memory stores feed into context assembly.
     """
     user_profile = {
         "name":           "Jordan",
@@ -373,38 +359,15 @@ def demonstrate_context_engineering() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    coach = MemoryEnabledDietCoach(user_id="jordan_demo")
+    USER_ID = "jordan_demo"
 
-    # Populate semantic memory (normally gathered over first session)
-    coach.update_profile(
-        name="Jordan",
-        age=32,
-        weight_kg=78,
-        goal="Lose 5 kg over 3 months",
-        restrictions="Lactose intolerant",
-        activity_level="Runs 3x per week",
-    )
-
-    # Seed an episodic memory entry (simulating a past session)
-    coach.episodic.add_episode(
-        summary="Jordan discussed breakfast habits and protein intake.",
-        key_insights=["Skips breakfast most days", "Protein at lunch only ~20 g"],
-        goal_set="Eat 30 g of protein at breakfast every day this week.",
-    )
-
-    print("── Memory-Enabled Diet Coach ───────────────────────────────")
-    reply1 = coach.chat("Hi, I'm back. I've been struggling to hit my protein goal.")
+    # ── Section 5.5: Diet Coach with Mem0 memory ────────────────────────────
+    print("── Memory-Enabled Diet Coach (Mem0) ────────────────────────")
+    reply1 = chat_turn("I'm on a cut. High protein, low carbs.", USER_ID)
     print(f"Coach: {reply1}\n")
 
-    reply2 = coach.chat("I had eggs and smoked salmon this morning — felt great.")
+    reply2 = chat_turn("What should I have for dinner?", USER_ID)
     print(f"Coach: {reply2}\n")
-
-    # Save session episode
-    coach.save_session(
-        summary="Jordan successfully added a high-protein breakfast with eggs and salmon.",
-        insights=["Responded well to concrete meal suggestions", "Morning routine is the highest-leverage window"],
-        goal="Continue 30 g protein at breakfast and add a mid-afternoon snack.",
-    )
 
     # ── Section 5.6: Context Engineering ────────────────────────────────────
     print("\n── Section 5.6: Context Engineering ───────────────────────")

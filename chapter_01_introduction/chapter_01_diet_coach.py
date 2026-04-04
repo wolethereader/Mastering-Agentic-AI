@@ -12,10 +12,10 @@ add until you feel what is missing without them.
 """
 
 import os
-from anthropic import Anthropic
+from openai import OpenAI
 
 # ── Constants ────────────────────────────────────────────────────────────────
-MODEL = "claude-opus-4-5"          # swap for any OpenAI-compatible endpoint
+MODEL = "gpt-4.1-nano"
 MAX_TOKENS = 1024
 HISTORY_LIMIT = 20                  # keep last N turns in context window
 
@@ -46,7 +46,7 @@ def run_diet_coach() -> None:
     perceive (user prompt) → reason (LLM forward pass) → act (print reply).
     Multi-turn conversation is the first step toward real agency.
     """
-    client = Anthropic()
+    client = OpenAI()
     history: list[dict] = []
 
     print("=" * 60)
@@ -71,21 +71,20 @@ def run_diet_coach() -> None:
         trimmed = history[-HISTORY_LIMIT:]
 
         # ── Reason + Respond ──────────────────────────────────────────
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=trimmed,
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + trimmed,
         )
 
-        reply = response.content[0].text
+        reply = response.choices[0].message.content
         history.append({"role": "assistant", "content": reply})
 
         print(f"\nCoach: {reply}\n")
 
         # ── Observe (chapter 1 version: just print stop reason) ───────
-        if response.stop_reason != "end_turn":
-            print(f"[debug] stop_reason={response.stop_reason}")
+        if response.choices[0].finish_reason != "stop":
+            print(f"[debug] finish_reason={response.choices[0].finish_reason}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

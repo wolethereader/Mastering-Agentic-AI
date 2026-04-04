@@ -44,10 +44,7 @@ except ImportError:
     FastMCP = None
     create_connected_server_and_client_session = None
 
-try:
-    import anthropic
-except ImportError:
-    anthropic = None
+from openai import OpenAI
 
 try:
     from composio import Composio
@@ -73,15 +70,15 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-Under the hood, tool-use in Claude works as follows:
+Under the hood, tool-use in LLMs works as follows:
 
   1. The API receives your `tools` parameter — a JSON Schema array.
-  2. During the forward pass the model decides to emit a `tool_use` block
-     instead of (or alongside) a `text` block.
-  3. The API returns stop_reason="tool_use".
+  2. During the forward pass the model decides to emit a tool call
+     instead of (or alongside) a text response.
+  3. The API returns finish_reason="tool_calls".
   4. YOUR code executes the function and returns the result.
-  5. You append a `tool_result` block and call the API again.
-  6. Repeat until stop_reason="end_turn".
+  5. You append a tool message and call the API again.
+  6. Repeat until finish_reason="stop".
 
 The model never directly executes code. It only *describes* what it
 wants to call. You are the runtime.
@@ -94,20 +91,23 @@ wants to call. You are the runtime.
 # ── Approach A: Manual JSON Schema (most explicit, most control) ──────────────
 
 TOOL_NUTRITION_LOOKUP_MANUAL = {
-    "name": "lookup_nutrition",
-    "description": (
-        "Return macro-nutrient data (calories, protein, carbs, fat, fibre) "
-        "for a given food item per 100 g serving."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "food_item": {
-                "type": "string",
-                "description": "Common name of the food (e.g. 'chicken breast', 'oats')",
-            }
+    "type": "function",
+    "function": {
+        "name": "lookup_nutrition",
+        "description": (
+            "Return macro-nutrient data (calories, protein, carbs, fat, fibre) "
+            "for a given food item per 100 g serving."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "food_item": {
+                    "type": "string",
+                    "description": "Common name of the food (e.g. 'chicken breast', 'oats')",
+                }
+            },
+            "required": ["food_item"],
         },
-        "required": ["food_item"],
     },
 }
 
@@ -137,9 +137,12 @@ def tool_from_function(fn: Callable) -> dict:
             required.append(name)
 
     return {
-        "name": fn.__name__,
-        "description": (fn.__doc__ or "").strip(),
-        "input_schema": {"type": "object", "properties": props, "required": required},
+        "type": "function",
+        "function": {
+            "name": fn.__name__,
+            "description": (fn.__doc__ or "").strip(),
+            "parameters": {"type": "object", "properties": props, "required": required},
+        },
     }
 
 
@@ -571,10 +574,7 @@ def run_skill_guided_agent(user_message: str) -> str:
     The Diet Coach using BOTH the SKILL (system prompt) and TOOLS (API).
     This is the fullest version of the coach so far.
     """
-    if anthropic is None:
-        raise RuntimeError("Install anthropic first: pip install anthropic")
-
-    client = anthropic.Anthropic()
+    client = OpenAI()
 
     skill_text = SKILL_PATH.read_text() if SKILL_PATH.exists() else ""
 
@@ -585,33 +585,33 @@ def run_skill_guided_agent(user_message: str) -> str:
         "Apply your Skill protocol when conducting full assessments."
     )
 
-    messages = [{"role": "user", "content": user_message}]
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_message},
+    ]
 
     while True:
-        response = client.messages.create(
-            model="claude-opus-4-5",
+        response = client.chat.completions.create(
+            model="gpt-4.1-nano",
             max_tokens=1024,
-            system=system,
             tools=TOOLS,
             messages=messages,
         )
 
-        messages.append({"role": "assistant", "content": response.content})
+        choice = response.choices[0]
+        messages.append(choice.message)
 
-        if response.stop_reason == "end_turn":
-            return " ".join(b.text for b in response.content if b.type == "text")
+        if choice.finish_reason == "stop":
+            return choice.message.content or ""
 
-        if response.stop_reason != "tool_use":
+        if choice.finish_reason != "tool_calls":
             break
 
-        tool_results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                fn = TOOL_FNS.get(block.name)
-                result = fn(**block.input) if fn else json.dumps({"error": "unknown tool"})
-                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
-
-        messages.append({"role": "user", "content": tool_results})
+        for tc in choice.message.tool_calls:
+            fn = TOOL_FNS.get(tc.function.name)
+            args = json.loads(tc.function.arguments)
+            result = fn(**args) if fn else json.dumps({"error": "unknown tool"})
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
     return "[loop ended unexpectedly]"
 
@@ -649,13 +649,9 @@ if __name__ == "__main__":
     else:
         print("Skipping Composio demo. Install `composio` + `composio_crewai` and set `COMPOSIO_API_KEY`.")
 
-    if anthropic is not None and os.getenv("ANTHROPIC_API_KEY"):
-        print("\n── Chapter 4 Agent: Skill-Guided Tool Use ───────────────────")
-        answer = run_skill_guided_agent(
-            "I want to build more muscle. What should I eat for dinner tonight? "
-            "I want something under 500 calories and high in protein."
-        )
-        print(f"Coach: {answer}")
-    else:
-        print("\n── Chapter 4 Agent: Skill-Guided Tool Use ───────────────────")
-        print("Skipping agent demo. Install `anthropic` and set `ANTHROPIC_API_KEY` to run it.")
+    print("\n── Chapter 4 Agent: Skill-Guided Tool Use ───────────────────")
+    answer = run_skill_guided_agent(
+        "I want to build more muscle. What should I eat for dinner tonight? "
+        "I want something under 500 calories and high in protein."
+    )
+    print(f"Coach: {answer}")
